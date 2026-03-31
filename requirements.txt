@@ -1,0 +1,4 @@
+requests
+colorama
+python-dotenv
+py-clob-client
