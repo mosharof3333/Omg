@@ -2,7 +2,7 @@ import time
 import math
 import random
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 from colorama import init, Fore, Style
 
 init(autoreset=True)
@@ -18,54 +18,45 @@ balance = STARTING_BALANCE
 total_pnl = 0.0
 previous_outcome = "Up"
 
-print(f"{Fore.CYAN}=== Polymarket 5-Min BTC Momentum Bot (DEMO ONLY - Deterministic Slug) ==={Style.RESET_ALL}")
+print(f"{Fore.CYAN}=== Polymarket 5-Min BTC Momentum Bot (DEMO ONLY - Fixed Prices) ==={Style.RESET_ALL}")
 print(f"Starting Capital: ${STARTING_BALANCE:,.2f}")
 print(f"Buy timing: Every 60s at t≈0s, 60s, 120s, 180s (no buys in final minute)\n")
 
 def get_current_window_ts():
     now = int(time.time())
-    window_ts = math.floor(now / 300) * 300  # Floor to nearest 5-min boundary
-    return window_ts
+    return math.floor(now / 300) * 300
 
 def discover_btc_5m_market():
     ts = get_current_window_ts()
     slug = f"btc-updown-5m-{ts}"
-    print(f"{Fore.BLUE}Using deterministic slug: {slug}{Style.RESET_ALL}")
+    print(f"{Fore.BLUE}Using slug: {slug}{Style.RESET_ALL}")
     
-    # Query Gamma API with exact slug (primary method used by working bots)
     try:
         resp = requests.get(f"{GAMMA_API}/markets", params={"slug": slug}, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
             if isinstance(data, list) and len(data) > 0:
                 market = data[0]
-                print(f"{Fore.GREEN}Successfully loaded market: {market.get('slug', slug)}{Style.RESET_ALL}")
+                print(f"{Fore.GREEN}Loaded market: {market.get('slug', slug)}{Style.RESET_ALL}")
                 return market
     except Exception as e:
-        print(f"{Fore.YELLOW}Direct slug query failed: {e}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Slug query failed: {e}{Style.RESET_ALL}")
     
-    print(f"{Fore.RED}Could not load market for slug {slug} - using safe fallback (prices may be static){Style.RESET_ALL}")
-    return {"slug": slug, "outcomePrices": [0.50, 0.50]}
+    print(f"{Fore.RED}Using fallback (prices may be static){Style.RESET_ALL}")
+    return {"slug": slug, "outcomePrices": ["0.50", "0.50"]}
 
 def get_live_prices(market):
-    """Extract real-time Up/Down prices - prioritizes outcomePrices"""
-    # Primary: outcomePrices array (most reliable for Up/Down markets)
+    """Extract real prices - prioritizes outcomePrices array"""
     if "outcomePrices" in market and isinstance(market["outcomePrices"], list) and len(market["outcomePrices"]) >= 2:
-        up_p = float(market["outcomePrices"][0])
-        down_p = float(market["outcomePrices"][1])
-        return round(up_p, 4), round(down_p, 4)
+        try:
+            up_p = float(market["outcomePrices"][0])
+            down_p = float(market["outcomePrices"][1])
+            return round(up_p, 4), round(down_p, 4)
+        except:
+            pass
     
-    # Fallback: tokens or other fields
-    tokens = market.get("tokens", [])
-    up_price = down_price = 0.50
-    for t in tokens:
-        price = float(t.get("price", t.get("lastTradePrice", 0.5)))
-        outcome = str(t.get("outcome", "")).lower()
-        if "up" in outcome:
-            up_price = price
-        elif "down" in outcome:
-            down_price = price
-    return round(up_price, 4), round(down_price, 4)
+    # Fallback
+    return 0.50, 0.50
 
 def colored_print(text, color=Fore.WHITE):
     print(f"{color}{text}{Style.RESET_ALL}")
@@ -74,7 +65,7 @@ def colored_print(text, color=Fore.WHITE):
 try:
     while True:
         window_ts = get_current_window_ts()
-        colored_print(f"\n=== New 5-Min Window: {datetime.utcfromtimestamp(window_ts)} UTC ===", Fore.CYAN)
+        colored_print(f"\n=== New 5-Min Window: {datetime.fromtimestamp(window_ts, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} ===", Fore.CYAN)
         
         market = discover_btc_5m_market()
         up_price, down_price = get_live_prices(market)
@@ -83,16 +74,18 @@ try:
         colored_print(f"Previous outcome: {previous_outcome} → Buying {direction}", Fore.YELLOW)
         colored_print(f"Live Prices from Gamma API → Up: ${up_price:.4f} | Down: ${down_price:.4f}", Fore.WHITE)
         
+        if up_price == 0.50 and down_price == 0.50:
+            colored_print("Note: Prices at 0.50 - market may not be live yet or API returned fallback", Fore.YELLOW)
+        
         total_cost = 0.0
         buy_prices = []
         
-        # Buys every 60 seconds
         for i, shares in enumerate(SHARES_SCHEDULE):
             buy_second = i * 60
             colored_print(f"\nBuy at \~{buy_second}s (Minute {i+1}): {shares} {direction}", Fore.BLUE)
             
             base_price = up_price if direction == "Up" else down_price
-            drift = random.uniform(-0.012, 0.018) * (1 + i * 0.5)  # Realistic live movement
+            drift = random.uniform(-0.012, 0.018) * (1 + i * 0.5)
             price = round(max(0.01, min(0.99, base_price * (1 + drift))), 4)
             
             cost = shares * price
@@ -110,7 +103,6 @@ try:
         colored_print("Waiting for window resolution (no activity in final minute)...", Fore.MAGENTA)
         time.sleep(300 - (len(SHARES_SCHEDULE) * 60) + 15)
         
-        # Simulate resolution (slightly biased to continuation)
         resolved_outcome = "Up" if random.random() > 0.47 else "Down"
         won = (resolved_outcome == direction)
         payout = 90.0 if won else 0.0
