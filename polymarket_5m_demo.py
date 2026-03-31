@@ -18,68 +18,53 @@ balance = STARTING_BALANCE
 total_pnl = 0.0
 previous_outcome = "Up"
 
-print(f"{Fore.CYAN}=== Polymarket 5-Min BTC Momentum Bot (DEMO ONLY - Real Gamma Prices) ==={Style.RESET_ALL}")
+print(f"{Fore.CYAN}=== Polymarket 5-Min BTC Momentum Bot (DEMO ONLY - Deterministic Slug) ==={Style.RESET_ALL}")
 print(f"Starting Capital: ${STARTING_BALANCE:,.2f}")
-print(f"Buy timing: Every 60s at t≈0s, 60s, 120s, 180s\n")
+print(f"Buy timing: Every 60s at t≈0s, 60s, 120s, 180s (no buys in final minute)\n")
 
 def get_current_window_ts():
     now = int(time.time())
-    return math.floor(now / 300) * 300  # Exact start of current 5-min window
+    window_ts = math.floor(now / 300) * 300  # Floor to nearest 5-min boundary
+    return window_ts
 
 def discover_btc_5m_market():
     ts = get_current_window_ts()
     slug = f"btc-updown-5m-{ts}"
-    print(f"{Fore.BLUE}Trying slug: {slug}{Style.RESET_ALL}")
+    print(f"{Fore.BLUE}Using deterministic slug: {slug}{Style.RESET_ALL}")
     
-    # Primary: direct slug lookup
+    # Query Gamma API with exact slug (primary method used by working bots)
     try:
         resp = requests.get(f"{GAMMA_API}/markets", params={"slug": slug}, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
-            if isinstance(data, list) and data:
+            if isinstance(data, list) and len(data) > 0:
                 market = data[0]
-                print(f"{Fore.GREEN}Found market: {market.get('slug', slug)}{Style.RESET_ALL}")
+                print(f"{Fore.GREEN}Successfully loaded market: {market.get('slug', slug)}{Style.RESET_ALL}")
                 return market
     except Exception as e:
-        print(f"{Fore.YELLOW}Direct slug failed: {e}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Direct slug query failed: {e}{Style.RESET_ALL}")
     
-    # Strong fallback: search active markets and pick BTC 5m
-    try:
-        resp = requests.get(f"{GAMMA_API}/markets", 
-                           params={"active": "true", "closed": "false", "limit": 50}, 
-                           timeout=10)
-        if resp.status_code == 200:
-            markets = resp.json()
-            for m in markets:
-                s = m.get("slug", "").lower()
-                if "btc-updown-5m" in s:
-                    print(f"{Fore.GREEN}Fallback found: {m.get('slug')}{Style.RESET_ALL}")
-                    return m
-    except Exception as e:
-        print(f"{Fore.YELLOW}Fallback search failed: {e}{Style.RESET_ALL}")
-    
-    print(f"{Fore.RED}No live market found - using demo fallback{Style.RESET_ALL}")
-    return {"slug": slug, "tokens": [{"outcome": "Up", "price": 0.50}, {"outcome": "Down", "price": 0.50}]}
+    print(f"{Fore.RED}Could not load market for slug {slug} - using safe fallback (prices may be static){Style.RESET_ALL}")
+    return {"slug": slug, "outcomePrices": [0.50, 0.50]}
 
 def get_live_prices(market):
-    """Extract real-time Up and Down prices from Gamma response"""
-    # Try outcomePrices array first (common in recent API)
+    """Extract real-time Up/Down prices - prioritizes outcomePrices"""
+    # Primary: outcomePrices array (most reliable for Up/Down markets)
     if "outcomePrices" in market and isinstance(market["outcomePrices"], list) and len(market["outcomePrices"]) >= 2:
         up_p = float(market["outcomePrices"][0])
         down_p = float(market["outcomePrices"][1])
         return round(up_p, 4), round(down_p, 4)
     
-    # Fallback: scan tokens
+    # Fallback: tokens or other fields
     tokens = market.get("tokens", [])
     up_price = down_price = 0.50
     for t in tokens:
         price = float(t.get("price", t.get("lastTradePrice", 0.5)))
         outcome = str(t.get("outcome", "")).lower()
-        if "up" in outcome or outcome == "yes":
+        if "up" in outcome:
             up_price = price
-        elif "down" in outcome or outcome == "no":
+        elif "down" in outcome:
             down_price = price
-    
     return round(up_price, 4), round(down_price, 4)
 
 def colored_print(text, color=Fore.WHITE):
@@ -98,20 +83,16 @@ try:
         colored_print(f"Previous outcome: {previous_outcome} → Buying {direction}", Fore.YELLOW)
         colored_print(f"Live Prices from Gamma API → Up: ${up_price:.4f} | Down: ${down_price:.4f}", Fore.WHITE)
         
-        if up_price == 0.50 and down_price == 0.50:
-            colored_print("Warning: Prices stuck at 0.50 - market discovery may need tuning", Fore.YELLOW)
-        
         total_cost = 0.0
         buy_prices = []
         
-        # Buys every 60 seconds (0s, 60s, 120s, 180s)
+        # Buys every 60 seconds
         for i, shares in enumerate(SHARES_SCHEDULE):
             buy_second = i * 60
             colored_print(f"\nBuy at \~{buy_second}s (Minute {i+1}): {shares} {direction}", Fore.BLUE)
             
             base_price = up_price if direction == "Up" else down_price
-            # Small realistic drift to simulate live order book changes
-            drift = random.uniform(-0.015, 0.015) * (1 + i * 0.5)
+            drift = random.uniform(-0.012, 0.018) * (1 + i * 0.5)  # Realistic live movement
             price = round(max(0.01, min(0.99, base_price * (1 + drift))), 4)
             
             cost = shares * price
@@ -126,10 +107,10 @@ try:
         avg_price = sum(buy_prices) / len(buy_prices)
         colored_print(f"\nTotal invested: ${total_cost:.2f} | Avg entry: ${avg_price:.4f}", Fore.WHITE)
         
-        colored_print("Waiting for window resolution (no buys in final minute)...", Fore.MAGENTA)
+        colored_print("Waiting for window resolution (no activity in final minute)...", Fore.MAGENTA)
         time.sleep(300 - (len(SHARES_SCHEDULE) * 60) + 15)
         
-        # Simulate resolution (biased slightly toward momentum)
+        # Simulate resolution (slightly biased to continuation)
         resolved_outcome = "Up" if random.random() > 0.47 else "Down"
         won = (resolved_outcome == direction)
         payout = 90.0 if won else 0.0
